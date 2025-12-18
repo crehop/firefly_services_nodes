@@ -80,8 +80,8 @@ class FireflyUpsamplerType(str, Enum):
 
 class FireflySize(BaseModel):
     """Image size specification"""
-    width: int = Field(..., description="Width of the image in pixels", ge=1, le=2688)
-    height: int = Field(..., description="Height of the image in pixels", ge=1, le=2688)
+    width: int = Field(..., description="Width of the image in pixels", ge=1, le=3999)
+    height: int = Field(..., description="Height of the image in pixels", ge=1, le=3999)
 
 
 class FireflyPublicBinaryInput(BaseModel):
