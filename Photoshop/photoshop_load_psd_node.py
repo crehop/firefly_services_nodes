@@ -146,7 +146,7 @@ class PhotoshopLoadPSDNode:
 
             # Upload to S3 using the storage helper
             print(f"[Load PSD] Importing storage modules...")
-            from comfy_api_nodes.apis.photoshop_storage import _upload_to_s3_sync, _load_firefly_config
+            from .photoshop_storage import _upload_to_s3_sync, _load_firefly_config
             import asyncio
 
             print(f"[Load PSD] Loading Firefly config...")

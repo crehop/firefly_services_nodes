@@ -2268,14 +2268,14 @@ class FireflyGenerativeExpandNode:
                         else:
                             mask_source = FireflyPublicBinaryInput(uploadId=mask_reference)
 
-                    from comfy_api_nodes.apis.firefly_api import FireflyInputMask
+                    from .firefly_api import FireflyInputMask
                     mask_input = FireflyInputMask(source=mask_source)
 
                 # Build placement if specified and no mask
                 # Note: alignment and inset are mutually exclusive
                 placement = None
                 if has_placement and not has_mask:
-                    from comfy_api_nodes.apis.firefly_api import FireflyPlacement, FireflyPlacementAlignment, FireflyPlacementInset
+                    from .firefly_api import FireflyPlacement, FireflyPlacementAlignment, FireflyPlacementInset
 
                     # If ANY inset value is specified, use inset ONLY (omit alignment)
                     # Set all 4 inset values (unspecified ones default to 0)
