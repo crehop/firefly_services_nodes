@@ -903,7 +903,10 @@ class PollingOperation(Generic[T, R]):
                 )
 
                 # Log raw response before Pydantic processes it
-                print(f"[RAW API RESPONSE] {json.dumps(resp, indent=2)}")
+                try:
+                    print(f"[RAW API RESPONSE] {json.dumps(resp, indent=2)}")
+                except OSError:
+                    pass  # Ignore Windows stdout flush errors
                 logging.info(f"[RAW API RESPONSE] {json.dumps(resp, indent=2)}")
 
                 consecutive_errors = 0  # reset on success

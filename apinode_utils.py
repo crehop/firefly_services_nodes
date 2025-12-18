@@ -2,6 +2,16 @@ from __future__ import annotations
 import aiohttp
 import io
 import logging
+import sys
+
+
+def safe_print(*args, **kwargs):
+    """Print wrapper that handles Windows stdout flush errors."""
+    try:
+        print(*args, **kwargs)
+        sys.stdout.flush()
+    except OSError:
+        pass  # Ignore Windows stdout flush errors
 import mimetypes
 from typing import Optional, Union
 from comfy.utils import common_upscale
@@ -9,7 +19,7 @@ from comfy_api.input_impl import VideoFromFile
 from comfy_api.util import VideoContainer, VideoCodec
 from comfy_api.input.video_types import VideoInput
 from comfy_api.input.basic_types import AudioInput
-from comfy_api_nodes.apis.client import (
+from .client import (
     ApiClient,
     ApiEndpoint,
     HttpMethod,

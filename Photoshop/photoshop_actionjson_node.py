@@ -547,7 +547,10 @@ class PhotoshopActionJsonNode:
             console_log += f"\n{'='*55}\n"
             console_log += f"ERROR: {str(e)}\n"
             console_log += f"{'='*55}\n"
-            print(console_log)  # Print to console even on error
+            try:
+                print(console_log)  # Print to console even on error
+            except OSError:
+                pass  # Ignore Windows stdout flush errors
 
             # Close client
             try:
