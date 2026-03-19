@@ -116,7 +116,7 @@ class PhotoshopRemoveBackgroundNode:
                     "tooltip": "Background color blue component (0-255)",
                 }),
                 "background_color_alpha": ("FLOAT", {
-                    "default": 0.0,
+                    "default": 1.0,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.1,
@@ -176,14 +176,13 @@ class PhotoshopRemoveBackgroundNode:
         log += f"    mediaType: {output_media_type}\n"
         log += f"    trim: {trim}\n"
 
-        if not trim:
-            log += "    backgroundColor:\n"
-            log += f"      red: {bg_red}\n"
-            log += f"      green: {bg_green}\n"
-            log += f"      blue: {bg_blue}\n"
-            log += f"      alpha: {bg_alpha}\n"
+        log += "  backgroundColor:\n"
+        log += f"    red: {bg_red}\n"
+        log += f"    green: {bg_green}\n"
+        log += f"    blue: {bg_blue}\n"
+        log += f"    alpha: {bg_alpha}\n"
 
-        log += f"    colorDecontamination: {color_decontamination}\n"
+        log += f"  colorDecontamination: {color_decontamination}\n"
 
         return log
 
@@ -254,7 +253,8 @@ class PhotoshopRemoveBackgroundNode:
             console_log += f"\nInput URL for Photoshop API:\n"
             console_log += f"  {input_url}\n"
 
-            # Build request
+            # Build request — backgroundColor and colorDecontamination are
+            # TOP-LEVEL fields on the request, NOT nested inside output.
             request = RemoveBackgroundRequest(
                 image=PhotoshopImageInput(
                     source=PhotoshopImageSource(
@@ -266,14 +266,14 @@ class PhotoshopRemoveBackgroundNode:
                 output=PhotoshopOutputOptions(
                     mediaType=output_media_type,
                     trim=trim,
-                    backgroundColor=PhotoshopBackgroundColor(
-                        red=background_color_red,
-                        green=background_color_green,
-                        blue=background_color_blue,
-                        alpha=background_color_alpha,
-                    ) if not trim else None,
-                    colorDecontamination=color_decontamination,
-                )
+                ),
+                backgroundColor=PhotoshopBackgroundColor(
+                    red=background_color_red,
+                    green=background_color_green,
+                    blue=background_color_blue,
+                    alpha=background_color_alpha,
+                ),
+                colorDecontamination=color_decontamination,
             )
 
             # Store the mode for later mask extraction

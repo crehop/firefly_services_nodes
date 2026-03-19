@@ -116,15 +116,20 @@ class AdobeAuthManager:
     # Adobe IMS token endpoint
     TOKEN_ENDPOINT = "https://ims-na1.adobelogin.com/ims/token/v3"
 
-    # Required scopes for Firefly API
+    # Required scopes for Firefly, Photoshop, Substance 3D, InDesign, and Audio/Video APIs
     SCOPES = [
         "openid",
         "AdobeID",
         "session",
         "additional_info",
+        "profile",
+        "email",
         "read_organizations",
         "firefly_api",
-        "ff_apis"
+        "ff_apis",
+        "creative_sdk",
+        "substance3d_api.spaces.create",
+        "substance3d_api.jobs.create",
     ]
 
     def __init__(

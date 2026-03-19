@@ -37,4 +37,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FireflyGenerateObjectCompositeNode": "Object Composite",
 }
 
+# V5 node loaded separately — requires separate config with staging credentials
+try:
+    from .firefly_nodes import FireflyImage5Node
+    NODE_CLASS_MAPPINGS["FireflyImage5Node"] = FireflyImage5Node
+    NODE_DISPLAY_NAME_MAPPINGS["FireflyImage5Node"] = "Firefly Image 5"
+except Exception:
+    pass
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

@@ -37,7 +37,7 @@ class CutoutAlphaFadeNode:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "apply_cutout"
-    CATEGORY = "Firefly Utils"
+    CATEGORY = "api node/Firefly Utils"
 
     def apply_cutout(self, image: torch.Tensor, mask: torch.Tensor):
         """

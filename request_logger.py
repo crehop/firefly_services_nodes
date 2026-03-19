@@ -103,7 +103,9 @@ def log_request_response(
     log_content.append(f"Method: {request_method}")
     log_content.append(f"URL: {request_url}")
     if request_headers:
-        log_content.append(f"Headers:\n{_format_data_for_logging(request_headers)}")
+        sanitized_headers = {k: ("[REDACTED]" if k.lower() in ("authorization", "x-api-key") else v)
+                             for k, v in request_headers.items()}
+        log_content.append(f"Headers:\n{_format_data_for_logging(sanitized_headers)}")
     if request_params:
         log_content.append(f"Params:\n{_format_data_for_logging(request_params)}")
     if request_data is not None:

@@ -70,13 +70,13 @@ class PhotoshopProductCropNode:
 
                 # Crop settings
                 "width": ("INT", {
-                    "default": 1,
+                    "default": 1024,
                     "min": 0,
                     "max": 8192,
                     "tooltip": "Width to be added as padding",
                 }),
                 "height": ("INT", {
-                    "default": 1,
+                    "default": 1024,
                     "min": 0,
                     "max": 8192,
                     "tooltip": "Height to be added as padding",
@@ -162,8 +162,8 @@ class PhotoshopProductCropNode:
         self,
         image: Optional[torch.Tensor] = None,
         image_reference: str = "",
-        width: int = 1,
-        height: int = 1,
+        width: int = 1024,
+        height: int = 1024,
         unit: str = "Pixels",
         output_type: str = "image/png",
         output_quality: int = 7,

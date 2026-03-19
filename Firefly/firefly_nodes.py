@@ -32,6 +32,7 @@ from .firefly_api import (
     UploadImageRequest,
     AsyncAcceptResponse,
     AsyncTaskResponse,
+    AsyncTaskV5Response,
     AsyncVideoTaskResponse,
     UploadImageResponse,
     FireflyVideoFormat,
@@ -42,6 +43,13 @@ from .firefly_api import (
     GenerateVideoRequest,
     FireflyOutputVideo,
     CustomModelsResponse,
+    # V5 (Image5) models
+    FireflyV5AspectRatio,
+    FireflyV5ReferenceBlobUsage,
+    FireflyV5ReferenceBlob,
+    FireflyV5ModelSpecificPayload,
+    GenerateImagesV5Request,
+    AsyncAcceptResponseV5,
 )
 from ..client import (
     ApiClient,
@@ -108,6 +116,82 @@ async def create_adobe_client(model_version: str = "image3") -> ApiClient:
     return client
 
 
+async def create_adobe_client_v5() -> ApiClient:
+    """
+    Create an ApiClient configured for Adobe Firefly V5 API (Image5).
+
+    Uses staging enterprise endpoint and credentials.
+
+    Returns:
+        ApiClient instance with Adobe authentication for V5 API
+    """
+    import aiohttp
+
+    # V5 uses the same credentials from firefly_config.json
+    _cfg = _load_firefly_config()
+    V5_CLIENT_ID = _cfg.get("client_id", "")
+    V5_CLIENT_SECRET = _cfg.get("client_secret", "")
+
+    # Get access token from Adobe IMS (staging)
+    token_endpoint = "https://ims-na1-stg1.adobelogin.com/ims/token/v3"
+    scopes = [
+        "openid",
+        "AdobeID",
+        "firefly_api",
+        "firefly_enterprise"
+    ]
+
+    form_data = {
+        "grant_type": "client_credentials",
+        "client_id": V5_CLIENT_ID,
+        "client_secret": V5_CLIENT_SECRET,
+        "scope": ",".join(scopes),
+    }
+
+    timeout = aiohttp.ClientTimeout(total=30.0)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            token_endpoint,
+            data=form_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise Exception(f"Failed to get V5 access token (status {resp.status}): {error_text}")
+            response_json = await resp.json()
+            access_token = response_json["access_token"]
+
+    # Build auth headers
+    auth_headers = {
+        "Authorization": f"Bearer {access_token}",
+        "x-api-key": V5_CLIENT_ID,
+        "x-model-version": "image5",
+    }
+
+    # Create client with V5 enterprise staging base URL
+    client = ApiClient(
+        base_url="https://firefly-api-enterprise-stage.adobe.io",
+        verify_ssl=True,
+        comfy_api_key="adobe_oauth",
+    )
+
+    # Store auth headers for use in requests
+    client._adobe_headers = auth_headers
+
+    # Override get_headers to include Adobe auth
+    original_get_headers = client.get_headers
+
+    def get_headers_with_adobe():
+        headers = original_get_headers()
+        headers.update(client._adobe_headers)
+        headers.pop("X-API-KEY", None)
+        return headers
+
+    client.get_headers = get_headers_with_adobe
+
+    return client
+
+
 async def upload_image_to_firefly(
     image: torch.Tensor,
     total_pixels: int = 4096 * 4096,
@@ -151,6 +235,56 @@ async def upload_image_to_firefly(
 
     except Exception as e:
         raise Exception(f"Failed to upload image to Firefly: {str(e)}")
+    finally:
+        await client.close()
+
+
+async def upload_image_to_firefly_v5(
+    image: torch.Tensor,
+    total_pixels: int = 4096 * 4096,
+) -> str:
+    """
+    Upload an image to Firefly STAGING storage for V5 API and return the upload ID.
+
+    Uses staging credentials and endpoint to ensure the image is accessible
+    by the V5 staging API.
+
+    Args:
+        image: Image tensor to upload
+        total_pixels: Maximum total pixels for the image
+
+    Returns:
+        Upload ID from Firefly staging storage
+    """
+    client = await create_adobe_client_v5()
+
+    try:
+        # Convert tensor to bytes
+        image_bytes = tensor_to_bytesio(image, total_pixels=total_pixels)
+        image_bytes.seek(0)  # Reset buffer position
+        data = image_bytes.read()
+
+        # Build headers
+        headers = client.get_headers()
+        headers["Content-Type"] = FireflyImageFormat.IMAGE_PNG.value
+
+        # Make direct HTTP request with raw binary data to staging storage
+        url = client.base_url.rstrip("/") + "/v2/storage/image"
+        session = await client._get_session()
+
+        async with session.post(url, data=data, headers=headers, ssl=client.verify_ssl) as resp:
+            resp.raise_for_status()
+            response_json = await resp.json()
+
+        # Extract upload ID from response {"images": [{"id": "..."}]}
+        if "images" in response_json and len(response_json["images"]) > 0:
+            upload_id = response_json["images"][0]["id"]
+            return upload_id
+        else:
+            raise Exception(f"Unexpected response format: {response_json}")
+
+    except Exception as e:
+        raise Exception(f"Failed to upload image to Firefly V5 staging: {str(e)}")
     finally:
         await client.close()
 
@@ -989,6 +1123,11 @@ class FireflyTextToImageNode:
 
             return (output_image, image_url, image_url_2, image_url_3, image_url_4, console_log)
 
+        except Exception as e:
+            console_log += f"\n[ERROR] {e}\n"
+            logging.error(f"FireflyTextToImageNode error: {e}")
+            raise
+
         finally:
             await client.close()
 
@@ -1380,6 +1519,11 @@ class FireflyGenerativeFillNode:
 
             return (images_tensor, image_url_1, image_url_2, image_url_3, image_url_4, console_log)
 
+        except Exception as e:
+            console_log += f"\n[ERROR] {e}\n"
+            logging.error(f"FireflyGenerativeFillNode error: {e}")
+            raise
+
         finally:
             await client.close()
 
@@ -1674,10 +1818,16 @@ class FireflyTextToVideoNode:
         client = await create_adobe_client(model_version=model_version)
 
         try:
-            # Build request
+            # Build request — set keyframe in both `image` and `conditions`
+            # The API uses `image` as the primary keyframe source
+            keyframe_input_image = None
+            if has_keyframe:
+                keyframe_input_image = FireflyInputImage(source=keyframe_source)
+
             request = GenerateVideoRequest(
                 prompt=prompt if has_prompt else None,
                 bitRateFactor=bit_rate_factor,
+                image=keyframe_input_image,
                 conditions=conditions,
                 seeds=seeds_list,
                 sizes=[FireflyVideoSize(width=width, height=height)],
@@ -1782,6 +1932,11 @@ class FireflyTextToVideoNode:
 
             return (video_output, video_url, console_log)
 
+        except Exception as e:
+            console_log += f"\n[ERROR] {e}\n"
+            logging.error(f"FireflyTextToVideoNode error: {e}")
+            raise
+
         finally:
             await client.close()
 
@@ -1862,6 +2017,7 @@ class FireflyListCustomModelsNode:
     RETURN_NAMES = ("models_json",)
     FUNCTION = "list_models"
     OUTPUT_NODE = True
+    API_NODE = True
     CATEGORY = "api node/firefly"
 
     @classmethod
@@ -1973,33 +2129,33 @@ class FireflyListCustomModelsNode:
 
             models_json = json.dumps(output_data, indent=2)
 
-            # Print summary to console
-            print(f"\n{'='*60}")
-            print(f"FIREFLY CUSTOM MODELS LIST")
-            print(f"{'='*60}")
-            print(f"Total models: {output_data['total_count']}")
-            print(f"Returned: {len(output_data['models'])}")
-            print(f"Filter: publishedState={published_state}")
-            print(f"Sort: {sort_by}")
-            print(f"{'='*60}\n")
+            # Log summary to console
+            logging.info(f"\n{'='*60}")
+            logging.info(f"FIREFLY CUSTOM MODELS LIST")
+            logging.info(f"{'='*60}")
+            logging.info(f"Total models: {output_data['total_count']}")
+            logging.info(f"Returned: {len(output_data['models'])}")
+            logging.info(f"Filter: publishedState={published_state}")
+            logging.info(f"Sort: {sort_by}")
+            logging.info(f"{'='*60}\n")
 
             for i, model in enumerate(output_data["models"], 1):
-                print(f"{i}. {model['displayName'] or model['assetName']}")
-                print(f"   ID: {model['assetId']}")
-                print(f"   Training Mode: {model['trainingMode']}")
+                logging.info(f"{i}. {model['displayName'] or model['assetName']}")
+                logging.info(f"   ID: {model['assetId']}")
+                logging.info(f"   Training Mode: {model['trainingMode']}")
                 if model['conceptId']:
-                    print(f"   Concept ID: {model['conceptId']}")
-                print(f"   State: {model['publishedState']}")
-                print(f"   Created: {model['createdDate']}")
+                    logging.info(f"   Concept ID: {model['conceptId']}")
+                logging.info(f"   State: {model['publishedState']}")
+                logging.info(f"   Created: {model['createdDate']}")
                 if model['samplePrompt']:
-                    print(f"   Sample Prompt: {model['samplePrompt'][:80]}...")
-                print()
+                    logging.info(f"   Sample Prompt: {model['samplePrompt'][:80]}...")
+                logging.info("")
 
             return {"ui": {"text": [models_json]}, "result": (models_json,)}
 
         except Exception as e:
             error_msg = f"Error listing custom models: {str(e)}"
-            print(f"\n[ERROR] {error_msg}\n")
+            logging.error(f"\n[ERROR] {error_msg}\n")
             return {"ui": {"text": [error_msg]}, "result": (error_msg,)}
 
         finally:
@@ -2414,6 +2570,11 @@ class FireflyGenerativeExpandNode:
 
             return (images_tensor, image_url, console_log)
 
+        except Exception as e:
+            console_log += f"\n[ERROR] {e}\n"
+            logging.error(f"FireflyGenerativeExpandNode error: {e}")
+            raise
+
         finally:
             await client.close()
 
@@ -2737,6 +2898,11 @@ class FireflyGenerateSimilarNode:
             image_url_4 = all_urls[3] if len(all_urls) > 3 else ""
 
             return (images_tensor, image_url, image_url_2, image_url_3, image_url_4, console_log)
+
+        except Exception as e:
+            console_log += f"\n[ERROR] {e}\n"
+            logging.error(f"FireflyGenerateSimilarNode error: {e}")
+            raise
 
         finally:
             await client.close()
@@ -3406,3 +3572,488 @@ class FireflyGenerateObjectCompositeNode:
         log += f"\nProcessed: {total_processed} image(s)\n"
         log += f"Generated: {total_urls} output(s)\n"
         log += "=" * 55 + "\n"
+        return log
+
+
+# ============================================================================
+# Firefly Image5 Node (V5 API)
+# ============================================================================
+
+class FireflyImage5Node:
+    """
+    Generate images from text prompts using Adobe Firefly Image 5 model.
+
+    Uses the V5 API endpoint (/v4/images/generate-async) with the image5 model.
+    Outputs include expanded renderer prompt, scene description, and other LLM-generated metadata.
+    """
+
+    RETURN_TYPES = (
+        "IMAGE",        # Generated image(s) - all variations batched
+        "IMAGE",        # image_1 - first variation
+        "IMAGE",        # image_2 - second variation
+        "IMAGE",        # image_3 - third variation
+        "IMAGE",        # image_4 - fourth variation
+        "STRING",       # image_url
+        "STRING",       # image_url_2
+        "STRING",       # image_url_3
+        "STRING",       # image_url_4
+        "STRING",       # renderer_prompt - expanded prompt used for generation
+        "STRING",       # content_type - photo, art, etc.
+        "STRING",       # scene - scene description
+        "STRING",       # lighting - lighting description
+        "STRING",       # background - background description
+        "STRING",       # composition - composition description
+        "STRING",       # details - detail description
+        "STRING",       # camera - camera settings
+        "STRING",       # entity - entity descriptions
+        "STRING",       # debug_log
+    )
+    RETURN_NAMES = (
+        "images",
+        "image_1",
+        "image_2",
+        "image_3",
+        "image_4",
+        "image_url",
+        "image_url_2",
+        "image_url_3",
+        "image_url_4",
+        "renderer_prompt",
+        "content_type",
+        "scene",
+        "lighting",
+        "background",
+        "composition",
+        "details",
+        "camera",
+        "entity",
+        "debug_log",
+    )
+    FUNCTION = "api_call"
+    API_NODE = True
+    CATEGORY = "api node/firefly"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                # Text input
+                "prompt": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": "Text prompt for image generation, or edit instructions when an image is provided (max 1500 characters).",
+                    },
+                ),
+
+                # Seeds
+                "seed": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": "Seed(s) for reproducibility. Single value or comma-separated (e.g., '1,2,3,4') for multiple variations.",
+                    },
+                ),
+
+                # Aspect ratio
+                "aspect_ratio": (
+                    ["1:1", "4:3", "3:4", "16:9", "9:16"],
+                    {
+                        "default": "1:1",
+                        "tooltip": "Aspect ratio for generation. Cannot be used with custom size.",
+                    },
+                ),
+
+                # Custom size toggle
+                "use_custom_size": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Use custom width/height instead of aspect ratio.",
+                    },
+                ),
+
+                # Custom size inputs
+                "width": (
+                    "INT",
+                    {
+                        "default": 2048,
+                        "min": 1,
+                        "max": 4096,
+                        "tooltip": "Custom width (only used when use_custom_size is True).",
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": 2048,
+                        "min": 1,
+                        "max": 4096,
+                        "tooltip": "Custom height (only used when use_custom_size is True).",
+                    },
+                ),
+
+                # Number of variations
+                "num_variations": (
+                    "INT",
+                    {
+                        "min": 1,
+                        "max": 4,
+                        "default": 1,
+                        "tooltip": "Number of image variations to generate (1-4).",
+                    },
+                ),
+
+                # Locale code
+                "locale_code": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": "Locale code (RFC 5646, e.g., 'en-US', 'ja-JP') for region-relevant content.",
+                    },
+                ),
+
+                # Image to edit (for instruct-edit mode)
+                "image_to_edit": (
+                    "IMAGE",
+                    {
+                        "tooltip": "Image to edit. When provided, the prompt becomes edit instructions. Leave empty for text-to-image generation.",
+                    },
+                ),
+                "image_reference": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "forceInput": True,
+                        "tooltip": "Image upload ID or presigned URL from another node. Alternative to image_to_edit input.",
+                    },
+                ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    async def api_call(
+        self,
+        prompt: str = "",
+        seed: str = "",
+        aspect_ratio: str = "1:1",
+        use_custom_size: bool = False,
+        width: int = 2048,
+        height: int = 2048,
+        num_variations: int = 1,
+        locale_code: str = "",
+        image_to_edit: Optional[torch.Tensor] = None,
+        image_reference: str = "",
+        unique_id: Optional[str] = None,
+    ):
+        """Generate images using Adobe Firefly Image 5 API."""
+
+        # Validate prompt
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt is required")
+        if len(prompt) > 1500:
+            raise ValueError(f"Prompt exceeds maximum length of 1500 characters (got {len(prompt)})")
+
+        # Parse seeds
+        seeds_list = None
+        if seed and seed.strip():
+            try:
+                seeds_list = [int(s.strip()) for s in seed.split(",") if s.strip()]
+                if len(seeds_list) > 4:
+                    raise ValueError("Maximum 4 seeds allowed")
+            except ValueError as e:
+                if "Maximum" in str(e):
+                    raise
+                raise ValueError(f"Invalid seed format: '{seed}'. Use integers separated by commas.")
+
+        # Create Adobe API client for V5 (uses https://firefly.adobe.io)
+        client = await create_adobe_client_v5()
+
+        try:
+            # Build reference blobs list (for instruct-edit mode)
+            # Supports up to 3 reference images, each can be tensor or string
+            reference_blobs = []
+
+            # Build reference blob from image_to_edit or image_reference
+            if image_to_edit is not None:
+                # Upload to Firefly STAGING storage (V5 uses staging endpoint)
+                upload_id = await upload_image_to_firefly_v5(
+                    image=image_to_edit[0] if len(image_to_edit.shape) == 4 else image_to_edit,
+                )
+                reference_blobs.append(FireflyV5ReferenceBlob(
+                    source=FireflyPublicBinaryInput(uploadId=upload_id),
+                    usage=FireflyV5ReferenceBlobUsage.GENERAL,
+                ))
+            elif image_reference:
+                # Use provided upload ID or presigned URL
+                if image_reference.lower().startswith("http"):
+                    reference_blobs.append(FireflyV5ReferenceBlob(
+                        source=FireflyPublicBinaryInput(url=image_reference),
+                        usage=FireflyV5ReferenceBlobUsage.GENERAL,
+                    ))
+                else:
+                    reference_blobs.append(FireflyV5ReferenceBlob(
+                        source=FireflyPublicBinaryInput(uploadId=image_reference),
+                        usage=FireflyV5ReferenceBlobUsage.GENERAL,
+                    ))
+
+            # Build model-specific payload
+            model_payload = None
+            if locale_code and locale_code.strip():
+                model_payload = FireflyV5ModelSpecificPayload(localeCode=locale_code.strip())
+
+            # Build request - aspectRatio and size are mutually exclusive
+            # Note: modelId/modelVersion set via x-model-version header, not in body
+            # IMPORTANT: aspectRatio/size cannot be specified for instruct-edit mode (when referenceBlobs provided)
+            is_instruct_edit = len(reference_blobs) > 0
+
+            if is_instruct_edit:
+                # Instruct-edit mode: aspect ratio is determined from reference image
+                request = GenerateImagesV5Request(
+                    prompt=prompt,
+                    numVariations=num_variations,
+                    seeds=seeds_list,
+                    referenceBlobs=reference_blobs,
+                    modelSpecificPayload=model_payload,
+                )
+            elif use_custom_size:
+                # Text-to-image with custom size
+                request = GenerateImagesV5Request(
+                    prompt=prompt,
+                    size=FireflySize(width=width, height=height),
+                    numVariations=num_variations,
+                    seeds=seeds_list,
+                    modelSpecificPayload=model_payload,
+                )
+            else:
+                # Text-to-image with aspect ratio
+                request = GenerateImagesV5Request(
+                    prompt=prompt,
+                    aspectRatio=FireflyV5AspectRatio(aspect_ratio),
+                    numVariations=num_variations,
+                    seeds=seeds_list,
+                    modelSpecificPayload=model_payload,
+                )
+
+            # Build debug log
+            console_log = self._build_debug_log(
+                prompt=prompt,
+                seed=seed,
+                aspect_ratio=aspect_ratio if not use_custom_size else None,
+                width=width if use_custom_size else None,
+                height=height if use_custom_size else None,
+                num_variations=num_variations,
+                locale_code=locale_code,
+                image_to_edit=image_to_edit,
+                image_reference=image_reference,
+            )
+
+            # Submit async job to V4 endpoint
+            submit_endpoint = ApiEndpoint(
+                path="/v4/images/generate-async",
+                method=HttpMethod.POST,
+                request_model=GenerateImagesV5Request,
+                response_model=AsyncAcceptResponse,
+            )
+
+            submit_op = SynchronousOperation(
+                endpoint=submit_endpoint,
+                request=request,
+                api_base="https://firefly-api-enterprise-stage.adobe.io",
+            )
+
+            submit_response: AsyncAcceptResponse = await submit_op.execute(client=client)
+
+            # Extract polling URL from statusUrl (same as V3 response format)
+            status_url = submit_response.statusUrl
+            console_log += f"\nResponse: 202 Accepted\n"
+            console_log += f"  jobId: {submit_response.jobId}\n"
+            console_log += f"  statusUrl: {status_url}\n"
+
+            # Extract path from status URL for polling
+            if status_url.startswith("http"):
+                from urllib.parse import urlparse
+                parsed = urlparse(status_url)
+                poll_path = parsed.path
+                # Use the host from statusUrl for polling (may be different from submit endpoint)
+                poll_base = f"{parsed.scheme}://{parsed.netloc}"
+            else:
+                poll_path = status_url
+                poll_base = "https://firefly-api-enterprise-stage.adobe.io"
+
+            # Poll for completion
+            console_log += f"\n{'='*55}\n"
+            console_log += f"GET {poll_path[:50]}...\n"
+            console_log += f"{'-'*55}\n"
+            console_log += f"Polling for job completion...\n"
+
+            poll_endpoint = ApiEndpoint(
+                path=poll_path,
+                method=HttpMethod.GET,
+                request_model=EmptyRequest,
+                response_model=AsyncTaskV5Response,
+            )
+
+            poll_op = PollingOperation(
+                poll_endpoint=poll_endpoint,
+                request=EmptyRequest(),
+                completed_statuses=["succeeded"],
+                failed_statuses=["failed", "canceled"],
+                status_extractor=lambda x: x.status,
+                api_base=poll_base,  # Use dynamic poll_base from statusUrl
+                poll_interval=2.0,
+                max_poll_attempts=120,
+                node_id=unique_id,
+            )
+
+            result: AsyncTaskV5Response = await poll_op.execute(client=client)
+
+            console_log += f"\nResponse: 200 OK\n"
+            console_log += f"  status: {result.status}\n"
+            console_log += f"  jobId: {result.jobId}\n"
+            console_log += f"  outputs: {len(result.outputs) if result.outputs else 0} image(s)\n"
+
+            # Validate outputs
+            if not result.outputs:
+                console_log += f"\n{'='*55}\n"
+                console_log += f"ERROR: No outputs in response\n"
+                console_log += f"  status: {result.status}\n"
+                raise Exception(f"No outputs returned from Firefly API. Status: {result.status}")
+
+            # Download outputs
+            console_log += f"\n{'='*55}\n"
+            console_log += f"Downloading {len(result.outputs)} output(s)...\n"
+
+            output_bytesio, presigned_urls = await download_firefly_outputs(
+                result.outputs,
+                unique_id=unique_id,
+            )
+
+            console_log += f"[OK] Downloaded {len(output_bytesio)} image(s)\n"
+            console_log += f"{'='*55}\n"
+
+            # Add presigned URLs to console log
+            console_log += f"\nPresigned URLs (valid for 1 hour):\n"
+            for i, url in enumerate(presigned_urls, 1):
+                console_log += f"  [{i}] {url}\n"
+            console_log += f"{'='*55}\n"
+
+            # Convert to tensors
+            images = []
+            for bytesio in output_bytesio:
+                image = bytesio_to_image_tensor(bytesio)
+                if len(image.shape) < 4:
+                    image = image.unsqueeze(0)
+                images.append(image)
+
+            # Batched output (all images combined)
+            output_image = torch.cat(images, dim=0)
+
+            # Individual image outputs (pad with None if fewer generated)
+            image_1 = images[0] if len(images) > 0 else None
+            image_2 = images[1] if len(images) > 1 else None
+            image_3 = images[2] if len(images) > 2 else None
+            image_4 = images[3] if len(images) > 3 else None
+
+            # Return all 4 URLs (pad with empty strings if fewer generated)
+            image_url = presigned_urls[0] if len(presigned_urls) > 0 else ""
+            image_url_2 = presigned_urls[1] if len(presigned_urls) > 1 else ""
+            image_url_3 = presigned_urls[2] if len(presigned_urls) > 2 else ""
+            image_url_4 = presigned_urls[3] if len(presigned_urls) > 3 else ""
+
+            # Extract V5-specific text outputs from debug data
+            renderer_prompt = result.renderer_prompt or ""
+            content_type = result.content_type or ""
+
+            # Extract description fields
+            desc = result.description
+            scene = desc.scene if desc and desc.scene else ""
+            lighting = desc.lighting if desc and desc.lighting else ""
+            background = desc.background if desc and desc.background else ""
+            composition = desc.composition if desc and desc.composition else ""
+            details = desc.details if desc and desc.details else ""
+            camera = desc.camera if desc and desc.camera else ""
+            entity = desc.entity if desc and desc.entity else ""
+
+            # Add V5 debug data to console log
+            if renderer_prompt:
+                console_log += f"\nRenderer Prompt:\n{renderer_prompt[:200]}...\n" if len(renderer_prompt) > 200 else f"\nRenderer Prompt:\n{renderer_prompt}\n"
+            if content_type:
+                console_log += f"\nContent Type: {content_type}\n"
+            console_log += f"{'='*55}\n"
+
+            return (
+                output_image,
+                image_1,
+                image_2,
+                image_3,
+                image_4,
+                image_url,
+                image_url_2,
+                image_url_3,
+                image_url_4,
+                renderer_prompt,
+                content_type,
+                scene,
+                lighting,
+                background,
+                composition,
+                details,
+                camera,
+                entity,
+                console_log,
+            )
+
+        finally:
+            await client.close()
+
+    def _build_debug_log(
+        self,
+        prompt: str,
+        seed: str,
+        aspect_ratio: Optional[str],
+        width: Optional[int],
+        height: Optional[int],
+        num_variations: int,
+        locale_code: str,
+        image_to_edit: Optional[torch.Tensor],
+        image_reference: str,
+    ) -> str:
+        """Build formatted debug log for console output."""
+        log = "=" * 55 + "\n"
+        log += "POST /v4/images/generate-async\n"
+        log += "-" * 55 + "\n"
+        log += f"Headers:\n"
+        log += f"  x-model-version: image5\n"
+        log += f"\nRequest Body:\n"
+        log += f"  prompt: {prompt[:50]}...\n" if len(prompt) > 50 else f"  prompt: {prompt}\n"
+        log += f"  modelId: firefly_image\n"
+        log += f"  modelVersion: image5\n"
+
+        if aspect_ratio:
+            log += f"  aspectRatio: {aspect_ratio}\n"
+        elif width and height:
+            log += f"  size: {width}x{height}\n"
+
+        log += f"  numVariations: {num_variations}\n"
+
+        if seed and seed.strip():
+            log += f"  seeds: [{seed}]\n"
+
+        if locale_code and locale_code.strip():
+            log += f"  modelSpecificPayload:\n"
+            log += f"    localeCode: {locale_code}\n"
+
+        # Show reference blob if image provided (instruct-edit mode)
+        if image_to_edit is not None or image_reference:
+            log += f"  referenceBlobs (instruct-edit mode):\n"
+            if image_to_edit is not None:
+                log += f"    - source: [UPLOADED IMAGE]\n"
+            else:
+                log += f"    - source: {image_reference}\n"
+            log += f"      usage: general\n"
+
+        return log

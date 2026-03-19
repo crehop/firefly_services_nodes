@@ -359,7 +359,11 @@ class ApiClient:
         if params:
             params = {k: v for k, v in params.items() if v is not None}  # aiohttp fails to serialize None values
 
-        logging.debug(f"[DEBUG] Request Headers: {request_headers}")
+        sanitized_headers = {
+            k: ("[REDACTED]" if k.lower() in ("authorization", "x-api-key") else v)
+            for k, v in request_headers.items()
+        }
+        logging.debug(f"[DEBUG] Request Headers: {sanitized_headers}")
         logging.debug(f"[DEBUG] Files: {files}")
         logging.debug(f"[DEBUG] Params: {params}")
         logging.debug(f"[DEBUG] Data: {data}")
@@ -735,6 +739,8 @@ class SynchronousOperation(Generic[T, R]):
             request_dict: Optional[Dict[str, Any]]
             if isinstance(self.request, EmptyRequest):
                 request_dict = None
+            elif isinstance(self.request, dict):
+                request_dict = self.request
             else:
                 request_dict = self.request.model_dump(exclude_none=True)
                 for k, v in list(request_dict.items()):

@@ -321,6 +321,99 @@ class GenerateImagesResponse(BaseModel):
     contentClass: Optional[FireflyContentClass] = Field(None, description="Content class")
 
 
+# V5-specific response models for debug data
+class FireflyV5LLMDescription(BaseModel):
+    """LLM-generated description breakdown from V5 API"""
+    scene: Optional[str] = Field(None, description="Scene description")
+    type: Optional[str] = Field(None, description="Type (e.g., 'photo, natural, outdoor')")
+    lighting: Optional[str] = Field(None, description="Lighting description")
+    background: Optional[str] = Field(None, description="Background description")
+    composition: Optional[str] = Field(None, description="Composition description")
+    details: Optional[str] = Field(None, description="Detail description")
+    camera: Optional[str] = Field(None, description="Camera settings")
+    entity: Optional[str] = Field(None, description="Entity descriptions")
+    version: Optional[str] = Field(None, description="Version")
+
+    class Config:
+        extra = "allow"  # Allow extra fields
+
+
+class FireflyV5LLMResponse(BaseModel):
+    """LLM response from V5 API debug data"""
+    workflow: Optional[str] = Field(None, description="Workflow type")
+    contentType: Optional[str] = Field(None, description="Content type (photo, art, etc.)")
+    description: Optional[FireflyV5LLMDescription] = Field(None, description="Description breakdown")
+    rendererPrompt: Optional[str] = Field(None, description="Expanded renderer prompt")
+
+    class Config:
+        extra = "allow"
+
+
+class FireflyV5DebugData(BaseModel):
+    """Debug data from V5 API response"""
+    llm_response: Optional[FireflyV5LLMResponse] = Field(None, description="LLM response data")
+    prompt_reasoner: Optional[str] = Field(None, description="Prompt reasoner used")
+    is_user_text_input_nsfw: Optional[bool] = Field(None, description="NSFW flag")
+
+    class Config:
+        extra = "allow"
+
+
+class GenerateImagesV5Response(BaseModel):
+    """V5-specific response wrapper with debug data"""
+    outputs: List[FireflyOutputImage] = Field(..., description="Output images")
+    size: Optional[FireflySize] = Field(None, description="Output size")
+    modelId: Optional[str] = Field(None, description="Model ID used")
+    modelVersion: Optional[str] = Field(None, description="Model version used")
+    debugData: Optional[FireflyV5DebugData] = Field(None, description="Debug data including LLM response")
+
+    class Config:
+        extra = "allow"
+
+
+class AsyncTaskV5Response(BaseModel):
+    """V5-specific response from status polling endpoint with debug data"""
+    jobId: str = Field(..., description="Job ID")
+    status: FireflyTaskStatus = Field(..., description="Current status")
+    result: Optional[GenerateImagesV5Response] = Field(None, description="Result when succeeded")
+    errorCode: Optional[str] = Field(None, description="Error code if failed")
+    errorMessage: Optional[str] = Field(None, description="Error message if failed")
+
+    class Config:
+        extra = "allow"
+
+    @property
+    def outputs(self) -> Optional[List[FireflyOutputImage]]:
+        """Helper property to access outputs directly"""
+        return self.result.outputs if self.result else None
+
+    @property
+    def renderer_prompt(self) -> Optional[str]:
+        """Helper property to access renderer prompt"""
+        if self.result and self.result.debugData and self.result.debugData.llm_response:
+            return self.result.debugData.llm_response.rendererPrompt
+        return None
+
+    @property
+    def content_type(self) -> Optional[str]:
+        """Helper property to access content type (falls back to description.type for instruct-edit)"""
+        if self.result and self.result.debugData and self.result.debugData.llm_response:
+            # Try contentType first (available in text-to-image)
+            if self.result.debugData.llm_response.contentType:
+                return self.result.debugData.llm_response.contentType
+            # Fall back to description.type (available in instruct-edit)
+            if self.result.debugData.llm_response.description and self.result.debugData.llm_response.description.type:
+                return self.result.debugData.llm_response.description.type
+        return None
+
+    @property
+    def description(self) -> Optional[FireflyV5LLMDescription]:
+        """Helper property to access description breakdown"""
+        if self.result and self.result.debugData and self.result.debugData.llm_response:
+            return self.result.debugData.llm_response.description
+        return None
+
+
 class GenerateVideoResponse(BaseModel):
     """Response wrapper for generated videos"""
     outputs: List[FireflyOutputVideo] = Field(..., description="Output videos")
@@ -410,3 +503,73 @@ class CustomModelsResponse(BaseModel):
     custom_models: List[CustomModel] = Field(default_factory=list, description="List of custom models")
     links: Optional[CustomModelsLinks] = Field(None, description="Hypermedia links for pagination", alias="_links")
     total_count: Optional[int] = Field(None, description="Total number of models")
+
+
+# ============================================================================
+# V5 (Image5) Models
+# ============================================================================
+
+class FireflyV5AspectRatio(str, Enum):
+    """Aspect ratio options for V5 image generation"""
+    SQUARE = "1:1"
+    LANDSCAPE_4_3 = "4:3"
+    PORTRAIT_3_4 = "3:4"
+    WIDESCREEN_16_9 = "16:9"
+    PORTRAIT_9_16 = "9:16"
+
+
+class FireflyV5ReferenceBlobUsage(str, Enum):
+    """Usage type for reference blobs in V5"""
+    GENERAL = "general"
+
+
+class FireflyV5ReferenceBlob(BaseModel):
+    """Reference blob for V5 image generation"""
+    source: FireflyPublicBinaryInput = Field(..., description="Source location of the reference image")
+    usage: Optional[FireflyV5ReferenceBlobUsage] = Field(
+        FireflyV5ReferenceBlobUsage.GENERAL,
+        description="Usage of the reference blob"
+    )
+
+
+class FireflyV5ModelSpecificPayload(BaseModel):
+    """Model-specific parameters for V5"""
+    localeCode: Optional[str] = Field(
+        None,
+        description="Locale code (RFC 5646 format, e.g., 'en-US') for region-relevant content"
+    )
+
+
+class GenerateImagesV5Request(BaseModel):
+    """Request for V5 (Image5) text-to-image generation"""
+    prompt: str = Field(..., description="Text prompt for generation", min_length=1, max_length=1500)
+    aspectRatio: Optional[FireflyV5AspectRatio] = Field(None, description="Aspect ratio (mutually exclusive with size)")
+    size: Optional[FireflySize] = Field(None, description="Custom size (mutually exclusive with aspectRatio)")
+    # Note: modelId and modelVersion are set via x-model-version header, not in body
+    numVariations: Optional[int] = Field(1, description="Number of variations", ge=1, le=4)
+    seeds: Optional[List[int]] = Field(None, description="Seeds for reproducibility (1-4 items)")
+    referenceBlobs: Optional[List[FireflyV5ReferenceBlob]] = Field(
+        default_factory=list,
+        description="Reference blobs for additional input"
+    )
+    modelSpecificPayload: Optional[FireflyV5ModelSpecificPayload] = Field(
+        None,
+        description="Additional model-specific parameters"
+    )
+
+
+class FireflyV5HypermediaLink(BaseModel):
+    """Hypermedia link in V5 responses"""
+    href: str = Field(..., description="URL for the link")
+
+
+class FireflyV5Links(BaseModel):
+    """Links in V5 async response"""
+    cancel: Optional[FireflyV5HypermediaLink] = Field(None, description="URL to cancel the job")
+    result: Optional[FireflyV5HypermediaLink] = Field(None, description="URL to poll for results")
+
+
+class AsyncAcceptResponseV5(BaseModel):
+    """Initial response from V5 async operations"""
+    links: FireflyV5Links = Field(..., description="Hypermedia links for job control")
+    progress: Optional[int] = Field(0, description="Generation progress")

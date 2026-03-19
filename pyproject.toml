@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-firefly-services"
-version = "1.0.0"
-description = "ComfyUI custom nodes for Adobe Firefly, Photoshop, and mask utility operations"
+version = "2.0.0"
+description = "ComfyUI custom nodes for Adobe Firefly, Photoshop, Substance 3D, InDesign, Video Reframe, and utility operations"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -16,9 +16,9 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/yourusername/comfyui-firefly-services"
+Repository = "https://github.com/crehop/firefly_services_nodes"
 
 [tool.comfyui]
-PublisherId = "your-publisher-id"
+PublisherId = "crehop"
 DisplayName = "Firefly Services"
 Icon = ""

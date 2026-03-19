@@ -6,7 +6,7 @@ This module contains Pydantic models for interacting with Adobe Photoshop API.
 
 from __future__ import annotations
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Union
 from pydantic import BaseModel, Field
 
 
@@ -71,8 +71,6 @@ class PhotoshopOutputOptions(BaseModel):
     """Output options for processed image"""
     mediaType: Optional[PhotoshopOutputMediaType] = Field(None, description="Output media type")
     trim: Optional[bool] = Field(False, description="Trim transparent pixels")
-    backgroundColor: Optional[PhotoshopBackgroundColor] = Field(None, description="Background color")
-    colorDecontamination: Optional[float] = Field(1.0, description="Color decontamination strength (0-1)", ge=0, le=1)
 
 
 class RemoveBackgroundRequest(BaseModel):
@@ -80,6 +78,8 @@ class RemoveBackgroundRequest(BaseModel):
     image: PhotoshopImageInput = Field(..., description="Input image")
     mode: Optional[PhotoshopRemoveBgMode] = Field(PhotoshopRemoveBgMode.CUTOUT, description="Removal mode")
     output: Optional[PhotoshopOutputOptions] = Field(None, description="Output options")
+    backgroundColor: Optional[PhotoshopBackgroundColor] = Field(None, description="Background color")
+    colorDecontamination: Optional[float] = Field(None, description="Color decontamination strength (0-1)", ge=0, le=1)
 
 
 class RefineMaskRequest(BaseModel):
@@ -942,6 +942,638 @@ class DocumentCreateJobStatus(BaseModel):
     """Status response from Document Create polling"""
     jobId: str = Field(..., description="Job ID")
     outputs: List[DocumentCreateOutputStatus] = Field(..., description="List of outputs with their statuses")
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def status(self) -> PhotoshopJobStatusEnum:
+        """Get overall status from first output (for compatibility with polling)"""
+        if self.outputs and len(self.outputs) > 0:
+            return self.outputs[0].status
+        return PhotoshopJobStatusEnum.PENDING
+
+    @property
+    def result(self):
+        """Build a result object for compatibility with existing code"""
+        if not self.outputs or len(self.outputs) == 0:
+            return None
+
+        succeeded_outputs = [o for o in self.outputs if o.status == PhotoshopJobStatusEnum.SUCCEEDED]
+        if not succeeded_outputs:
+            return None
+
+        class JobResult:
+            def __init__(self, outputs):
+                self.outputs = outputs
+
+        return JobResult(succeeded_outputs)
+
+
+# ============================================================================
+# Photoshop Document Manifest Models
+# ============================================================================
+
+class DocumentManifestInput(BaseModel):
+    """Input specification for Document Manifest"""
+    href: str = Field(..., description="Pre-signed GET URL to PSD file")
+    storage: str = Field(default="external", description="Storage type (external, azure, dropbox)")
+
+
+class ThumbnailOptions(BaseModel):
+    """Thumbnail options for document manifest"""
+    type: Optional[str] = Field("image/png", description="Thumbnail format (image/png, image/jpeg)")
+
+
+class DocumentManifestOptions(BaseModel):
+    """Options for Document Manifest extraction"""
+    thumbnails: Optional[ThumbnailOptions] = Field(None, description="Include thumbnail URLs for renderable layers")
+
+
+class DocumentManifestRequest(BaseModel):
+    """Request for Document Manifest extraction"""
+    inputs: List[DocumentManifestInput] = Field(..., description="Input PSD files to extract manifest from")
+    options: Optional[DocumentManifestOptions] = Field(None, description="Manifest extraction options")
+
+
+class DocumentManifestResponse(BaseModel):
+    """Response from Document Manifest submission"""
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def jobId(self) -> Optional[str]:
+        """Extract job ID from _links if available"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            href = self.links['self']['href']
+            parts = href.split('/')
+            if len(parts) > 0:
+                return parts[-1]
+        return None
+
+    @property
+    def statusUrl(self) -> Optional[str]:
+        """Extract status URL from _links"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            return self.links['self']['href']
+        return None
+
+
+class ManifestBounds(BaseModel):
+    """Bounds for layers in manifest"""
+    top: Optional[int] = Field(None, description="Top position")
+    left: Optional[int] = Field(None, description="Left position")
+    width: Optional[int] = Field(None, description="Width")
+    height: Optional[int] = Field(None, description="Height")
+
+
+class ManifestBlendOptions(BaseModel):
+    """Blend options in manifest"""
+    opacity: Optional[int] = Field(None, description="Layer opacity (0-100)")
+    blendMode: Optional[str] = Field(None, description="Blend mode")
+
+
+class ManifestMask(BaseModel):
+    """Mask info in manifest"""
+    enabled: Optional[bool] = Field(None, description="Whether mask is enabled")
+    linked: Optional[bool] = Field(None, description="Whether mask is linked")
+    offset: Optional[Offset] = Field(None, description="Mask offset")
+
+
+class ManifestTextStyle(BaseModel):
+    """Text style info in manifest"""
+    fontName: Optional[str] = Field(None, description="Font name")
+    fontSize: Optional[float] = Field(None, description="Font size")
+    fontColor: Optional[dict] = Field(None, description="Font color")
+
+
+class ManifestText(BaseModel):
+    """Text layer info in manifest"""
+    content: Optional[str] = Field(None, description="Text content")
+    characterStyles: Optional[List[dict]] = Field(None, description="Character styles")
+    paragraphStyles: Optional[List[dict]] = Field(None, description="Paragraph styles")
+
+
+class ManifestSmartObject(BaseModel):
+    """Smart object info in manifest"""
+    type: Optional[str] = Field(None, description="Smart object type")
+    linked: Optional[bool] = Field(None, description="Whether linked")
+    name: Optional[str] = Field(None, description="Smart object name")
+    instanceId: Optional[str] = Field(None, description="Instance ID")
+    path: Optional[str] = Field(None, description="Path for linked smart object")
+
+
+class ManifestLayerInfo(BaseModel):
+    """Layer information in document manifest"""
+    id: Optional[int] = Field(None, description="Layer ID")
+    index: Optional[int] = Field(None, description="Layer index")
+    type: Optional[str] = Field(None, description="Layer type (layer, textLayer, adjustmentLayer, layerSection, backgroundLayer, etc.)")
+    name: Optional[str] = Field(None, description="Layer name")
+    locked: Optional[bool] = Field(None, description="Whether layer is locked")
+    visible: Optional[bool] = Field(None, description="Whether layer is visible")
+    bounds: Optional[ManifestBounds] = Field(None, description="Layer bounds")
+    blendOptions: Optional[ManifestBlendOptions] = Field(None, description="Blend options")
+    mask: Optional[ManifestMask] = Field(None, description="Mask info")
+    text: Optional[ManifestText] = Field(None, description="Text layer info")
+    smartObject: Optional[ManifestSmartObject] = Field(None, description="Smart object info")
+    adjustments: Optional[dict] = Field(None, description="Adjustment layer settings")
+    fill: Optional[dict] = Field(None, description="Fill layer settings")
+    children: Optional[List["ManifestLayerInfo"]] = Field(None, description="Child layers for groups")
+    thumbnail: Optional[str] = Field(None, description="Thumbnail URL if requested")
+
+
+class ManifestDocumentInfo(BaseModel):
+    """Document information in manifest"""
+    name: Optional[str] = Field(None, description="Document name")
+    width: Optional[int] = Field(None, description="Document width in pixels")
+    height: Optional[int] = Field(None, description="Document height in pixels")
+    photoshopBuild: Optional[str] = Field(None, description="Photoshop build version")
+    imageMode: Optional[str] = Field(None, description="Image mode (rgb, cmyk, etc.)")
+    bitDepth: Optional[int] = Field(None, description="Bit depth (8, 16, 32)")
+
+
+class ManifestOutput(BaseModel):
+    """Output in manifest job status"""
+    input: Optional[str] = Field(None, description="Input URL that was processed")
+    status: Optional[str] = Field(None, description="Status of this output")
+    created: Optional[str] = Field(None, description="Creation timestamp")
+    modified: Optional[str] = Field(None, description="Modification timestamp")
+    document: Optional[ManifestDocumentInfo] = Field(None, description="Document information")
+    layers: Optional[List[ManifestLayerInfo]] = Field(None, description="Layer tree")
+    errors: Optional[Union[dict, List[dict]]] = Field(None, description="Errors if any")
+
+
+class DocumentManifestJobStatus(BaseModel):
+    """Status response from Document Manifest polling"""
+    jobId: Optional[str] = Field(None, description="Job ID")
+    outputs: Optional[List[ManifestOutput]] = Field(None, description="Manifest outputs")
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def status(self) -> str:
+        """Get overall status from first output (for compatibility with polling)"""
+        if self.outputs and len(self.outputs) > 0:
+            return self.outputs[0].status or "pending"
+        return "pending"
+
+
+# ============================================================================
+# Photoshop Document Operations Models
+# ============================================================================
+
+class DocumentOperationsInput(BaseModel):
+    """Input specification for Document Operations"""
+    href: str = Field(..., description="Pre-signed GET URL to PSD file")
+    storage: str = Field(default="external", description="Storage type (external, azure, dropbox)")
+
+
+class DocumentOperationsOutput(BaseModel):
+    """Output specification for Document Operations"""
+    href: str = Field(..., description="Pre-signed PUT URL for output")
+    storage: str = Field(default="external", description="Storage type")
+    type: str = Field(default="image/vnd.adobe.photoshop", description="Output MIME type (image/vnd.adobe.photoshop, image/png, image/jpeg, image/tiff)")
+    overwrite: Optional[bool] = Field(True, description="Overwrite existing file")
+    quality: Optional[int] = Field(None, description="Quality for JPEG output (1-12)", ge=1, le=12)
+    compression: Optional[str] = Field(None, description="Compression for PNG (small, medium, large)")
+
+
+class DocumentOperationsRequest(BaseModel):
+    """Request for Document Operations (modify existing PSD)"""
+    inputs: List[DocumentOperationsInput] = Field(..., description="Input PSD files (only one supported)")
+    outputs: List[DocumentOperationsOutput] = Field(..., description="Output specifications")
+    options: dict = Field(..., description="Document operation options including layers array")
+
+
+class DocumentOperationsResponse(BaseModel):
+    """Response from Document Operations submission"""
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def jobId(self) -> Optional[str]:
+        """Extract job ID from _links if available"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            href = self.links['self']['href']
+            parts = href.split('/')
+            if len(parts) > 0:
+                return parts[-1]
+        return None
+
+    @property
+    def statusUrl(self) -> Optional[str]:
+        """Extract status URL from _links"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            return self.links['self']['href']
+        return None
+
+
+class DocumentOperationsOutputStatus(BaseModel):
+    """Status of a single output in the outputs array for Document Operations API"""
+    status: PhotoshopJobStatusEnum = Field(..., description="Status of this output")
+    created: Optional[str] = Field(None, description="Creation timestamp")
+    modified: Optional[str] = Field(None, description="Last modification timestamp")
+    links: Optional[dict] = Field(None, alias="_links", description="Links including renditions")
+    input: Optional[str] = Field(None, description="Input URL that was processed")
+    errors: Optional[Union[dict, List[dict]]] = Field(None, description="Errors if any")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def destination(self):
+        """Extract destination URL from renditions"""
+        if self.links and "renditions" in self.links:
+            renditions = self.links["renditions"]
+            if isinstance(renditions, list) and len(renditions) > 0:
+                class Destination:
+                    def __init__(self, href):
+                        self.url = href
+                return Destination(renditions[0]["href"])
+        return None
+
+
+class DocumentOperationsJobStatus(BaseModel):
+    """Status response from Document Operations polling"""
+    jobId: str = Field(..., description="Job ID")
+    outputs: List[DocumentOperationsOutputStatus] = Field(..., description="List of outputs with their statuses")
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def status(self) -> PhotoshopJobStatusEnum:
+        """Get overall status from first output (for compatibility with polling)"""
+        if self.outputs and len(self.outputs) > 0:
+            return self.outputs[0].status
+        return PhotoshopJobStatusEnum.PENDING
+
+    @property
+    def result(self):
+        """Build a result object for compatibility with existing code"""
+        if not self.outputs or len(self.outputs) == 0:
+            return None
+
+        succeeded_outputs = [o for o in self.outputs if o.status == PhotoshopJobStatusEnum.SUCCEEDED]
+        if not succeeded_outputs:
+            return None
+
+        class JobResult:
+            def __init__(self, outputs):
+                self.outputs = outputs
+
+        return JobResult(succeeded_outputs)
+
+
+# ============================================================================
+# Photoshop Text Edit Models
+# ============================================================================
+
+class TextOptionsLayerText(BaseModel):
+    """Text content and style options for a text layer"""
+    content: Optional[str] = Field(None, description="The content of the text layer")
+    orientation: Optional[str] = Field(None, description="Text orientation (horizontal, vertical)")
+    antiAlias: Optional[str] = Field(None, description="Anti-alias type (antiAliasNone, antiAliasSharp, etc.)")
+    characterStyles: Optional[List[dict]] = Field(None, description="Array of character style objects")
+    paragraphStyles: Optional[List[dict]] = Field(None, description="Array of paragraph style objects")
+
+
+class TextOptionsLayer(BaseModel):
+    """Layer specification for text editing"""
+    id: Optional[int] = Field(None, description="The layer ID (use either id or name)")
+    name: Optional[str] = Field(None, description="The layer name (use either id or name)")
+    locked: Optional[bool] = Field(None, description="Is the layer editable")
+    visible: Optional[bool] = Field(None, description="Is the layer visible")
+    text: Optional[TextOptionsLayerText] = Field(None, description="Text layer attributes")
+    bounds: Optional[DocumentLayerBounds] = Field(None, description="Layer bounds")
+
+
+class TextOptions(BaseModel):
+    """Options for text layer editing"""
+    layers: List[TextOptionsLayer] = Field(..., description="Array of text layer objects to edit")
+    manageMissingFonts: Optional[str] = Field(None, description="Action for missing fonts (useDefault, fail)")
+    globalFont: Optional[str] = Field(None, description="PostScript name of global default font")
+    fonts: Optional[List[PhotoshopAsset]] = Field(None, description="Array of custom fonts")
+
+
+class TextEditRequest(BaseModel):
+    """Request for text layer editing"""
+    inputs: List[PhotoshopActionsInput] = Field(..., description="Input PSD files (only one supported)")
+    outputs: List[PhotoshopActionsOutput] = Field(..., description="Output specifications")
+    options: TextOptions = Field(..., description="Text editing options")
+
+
+class TextEditResponse(BaseModel):
+    """Response from Text Edit submission"""
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def jobId(self) -> Optional[str]:
+        """Extract job ID from _links if available"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            href = self.links['self']['href']
+            parts = href.split('/')
+            if len(parts) > 0:
+                return parts[-1]
+        return None
+
+    @property
+    def statusUrl(self) -> Optional[str]:
+        """Extract status URL from _links"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            return self.links['self']['href']
+        return None
+
+
+class TextEditOutputStatus(BaseModel):
+    """Status of a single output in the outputs array for Text Edit API"""
+    input: str = Field(..., description="Input URL that was processed")
+    status: PhotoshopJobStatusEnum = Field(..., description="Status of this output")
+    created: str = Field(..., description="Creation timestamp")
+    modified: str = Field(..., description="Last modification timestamp")
+    links: Optional[dict] = Field(None, alias="_links", description="Links including renditions")
+    errors: Optional[Union[dict, List[dict]]] = Field(None, description="Errors if any")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def destination(self):
+        """Extract destination URL from renditions"""
+        if self.links and "renditions" in self.links:
+            renditions = self.links["renditions"]
+            if isinstance(renditions, list) and len(renditions) > 0:
+                class Destination:
+                    def __init__(self, href):
+                        self.url = href
+                return Destination(renditions[0]["href"])
+        return None
+
+
+class TextEditJobStatus(BaseModel):
+    """Status response from Text Edit polling"""
+    jobId: str = Field(..., description="Job ID")
+    outputs: List[TextEditOutputStatus] = Field(..., description="List of outputs with their statuses")
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def status(self) -> PhotoshopJobStatusEnum:
+        """Get overall status from first output (for compatibility with polling)"""
+        if self.outputs and len(self.outputs) > 0:
+            return self.outputs[0].status
+        return PhotoshopJobStatusEnum.PENDING
+
+    @property
+    def result(self):
+        """Build a result object for compatibility with existing code"""
+        if not self.outputs or len(self.outputs) == 0:
+            return None
+
+        succeeded_outputs = [o for o in self.outputs if o.status == PhotoshopJobStatusEnum.SUCCEEDED]
+        if not succeeded_outputs:
+            return None
+
+        class JobResult:
+            def __init__(self, outputs):
+                self.outputs = outputs
+
+        return JobResult(succeeded_outputs)
+
+
+# ============================================================================
+# Photoshop Rendition Create Models
+# ============================================================================
+
+class LayerReference(BaseModel):
+    """Reference to a layer by ID or name"""
+    id: Optional[int] = Field(None, description="Layer ID")
+    name: Optional[str] = Field(None, description="Layer name")
+
+
+class RenditionOutput(BaseModel):
+    """Output specification for rendition creation"""
+    href: str = Field(..., description="Pre-signed PUT URL for output")
+    storage: str = Field(default="external", description="Storage type")
+    type: str = Field(..., description="Output MIME type (image/png, image/jpeg, image/tiff, image/vnd.adobe.photoshop)")
+    overwrite: Optional[bool] = Field(True, description="Overwrite existing file")
+    width: Optional[int] = Field(None, description="Width in pixels (0 for full size)")
+    maxWidth: Optional[int] = Field(None, description="Max width in pixels")
+    quality: Optional[int] = Field(None, description="Quality for JPEG (1-7)", ge=1, le=7)
+    compression: Optional[str] = Field(None, description="Compression for PNG (small, medium, large)")
+    trimToCanvas: Optional[bool] = Field(None, description="Trim to canvas bounds")
+    layers: Optional[List[LayerReference]] = Field(None, description="Specific layers to render (omit for full document)")
+
+
+class RenditionCreateRequest(BaseModel):
+    """Request for rendition creation"""
+    inputs: List[PhotoshopActionsInput] = Field(..., description="Input PSD files (only one supported)")
+    outputs: List[RenditionOutput] = Field(..., description="Output specifications")
+
+
+class RenditionCreateResponse(BaseModel):
+    """Response from Rendition Create submission"""
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def jobId(self) -> Optional[str]:
+        """Extract job ID from _links if available"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            href = self.links['self']['href']
+            parts = href.split('/')
+            if len(parts) > 0:
+                return parts[-1]
+        return None
+
+    @property
+    def statusUrl(self) -> Optional[str]:
+        """Extract status URL from _links"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            return self.links['self']['href']
+        return None
+
+
+class RenditionOutputStatus(BaseModel):
+    """Status of a single output in the outputs array for Rendition Create API"""
+    input: Optional[str] = Field(None, description="Input URL that was processed")
+    status: PhotoshopJobStatusEnum = Field(..., description="Status of this output")
+    created: Optional[str] = Field(None, description="Creation timestamp")
+    modified: Optional[str] = Field(None, description="Last modification timestamp")
+    links: Optional[dict] = Field(None, alias="_links", description="Links including renditions")
+    errors: Optional[Union[dict, List[dict]]] = Field(None, description="Errors if any")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def destination(self):
+        """Extract destination URL from renditions"""
+        if self.links and "renditions" in self.links:
+            renditions = self.links["renditions"]
+            if isinstance(renditions, list) and len(renditions) > 0:
+                class Destination:
+                    def __init__(self, href):
+                        self.url = href
+                return Destination(renditions[0]["href"])
+        return None
+
+
+class RenditionCreateJobStatus(BaseModel):
+    """Status response from Rendition Create polling"""
+    jobId: str = Field(..., description="Job ID")
+    outputs: List[RenditionOutputStatus] = Field(..., description="List of outputs with their statuses")
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def status(self) -> PhotoshopJobStatusEnum:
+        """Get overall status from first output (for compatibility with polling)"""
+        if self.outputs and len(self.outputs) > 0:
+            return self.outputs[0].status
+        return PhotoshopJobStatusEnum.PENDING
+
+    @property
+    def result(self):
+        """Build a result object for compatibility with existing code"""
+        if not self.outputs or len(self.outputs) == 0:
+            return None
+
+        succeeded_outputs = [o for o in self.outputs if o.status == PhotoshopJobStatusEnum.SUCCEEDED]
+        if not succeeded_outputs:
+            return None
+
+        class JobResult:
+            def __init__(self, outputs):
+                self.outputs = outputs
+
+        return JobResult(succeeded_outputs)
+
+
+# ============================================================================
+# Photoshop Smart Object Models
+# ============================================================================
+
+class SmartObjectLayerInput(BaseModel):
+    """Input specification for smart object replacement"""
+    href: str = Field(..., description="Pre-signed URL to replacement image")
+    storage: str = Field(default="external", description="Storage type")
+
+
+class SmartObjectLayerPosition(BaseModel):
+    """Position specification for adding smart object layer"""
+    insertAbove: Optional[dict] = Field(None, description="Insert above layer {id or name}")
+    insertBelow: Optional[dict] = Field(None, description="Insert below layer {id or name}")
+    insertInto: Optional[dict] = Field(None, description="Insert into layer group {id or name}")
+    insertTop: Optional[bool] = Field(None, description="Insert at top of layer stack")
+    insertBottom: Optional[bool] = Field(None, description="Insert at bottom of layer stack")
+
+
+class SmartObjectLayer(BaseModel):
+    """Smart object layer specification"""
+    id: Optional[int] = Field(None, description="Layer ID to replace")
+    name: Optional[str] = Field(None, description="Layer name to replace")
+    input: SmartObjectLayerInput = Field(..., description="Replacement image input")
+    bounds: Optional[DocumentLayerBounds] = Field(None, description="Layer bounds")
+    locked: Optional[bool] = Field(False, description="Is the layer locked")
+    visible: Optional[bool] = Field(True, description="Is the layer visible")
+    add: Optional[SmartObjectLayerPosition] = Field(None, description="Position for adding new smart object")
+
+
+class SmartObjectOptions(BaseModel):
+    """Options for smart object replacement"""
+    layers: List[SmartObjectLayer] = Field(..., description="Array of smart object layers")
+
+
+class SmartObjectOutput(BaseModel):
+    """Output specification for smart object replacement"""
+    href: str = Field(..., description="Pre-signed PUT URL for output")
+    storage: str = Field(default="external", description="Storage type")
+    type: str = Field(default="image/vnd.adobe.photoshop", description="Output MIME type")
+    overwrite: Optional[bool] = Field(True, description="Overwrite existing file")
+    width: Optional[int] = Field(None, description="Width in pixels (0 for full size)")
+    quality: Optional[int] = Field(None, description="Quality for JPEG (1-7)", ge=1, le=7)
+    compression: Optional[str] = Field(None, description="Compression for PNG (small, medium, large)")
+
+
+class SmartObjectRequest(BaseModel):
+    """Request for smart object replacement"""
+    inputs: List[PhotoshopActionsInput] = Field(..., description="Input PSD files (only one supported)")
+    outputs: List[SmartObjectOutput] = Field(..., description="Output specifications")
+    options: SmartObjectOptions = Field(..., description="Smart object replacement options")
+
+
+class SmartObjectResponse(BaseModel):
+    """Response from Smart Object submission"""
+    links: Optional[dict] = Field(None, alias="_links", description="Job status links")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def jobId(self) -> Optional[str]:
+        """Extract job ID from _links if available"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            href = self.links['self']['href']
+            parts = href.split('/')
+            if len(parts) > 0:
+                return parts[-1]
+        return None
+
+    @property
+    def statusUrl(self) -> Optional[str]:
+        """Extract status URL from _links"""
+        if self.links and 'self' in self.links and 'href' in self.links['self']:
+            return self.links['self']['href']
+        return None
+
+
+class SmartObjectOutputStatus(BaseModel):
+    """Status of a single output in the outputs array for Smart Object API"""
+    input: Optional[str] = Field(None, description="Input URL that was processed")
+    status: PhotoshopJobStatusEnum = Field(..., description="Status of this output")
+    created: Optional[str] = Field(None, description="Creation timestamp")
+    modified: Optional[str] = Field(None, description="Last modification timestamp")
+    links: Optional[dict] = Field(None, alias="_links", description="Links including renditions")
+    errors: Optional[Union[dict, List[dict]]] = Field(None, description="Errors if any")
+
+    class Config:
+        populate_by_name = True
+
+    @property
+    def destination(self):
+        """Extract destination URL from renditions"""
+        if self.links and "renditions" in self.links:
+            renditions = self.links["renditions"]
+            if isinstance(renditions, list) and len(renditions) > 0:
+                class Destination:
+                    def __init__(self, href):
+                        self.url = href
+                return Destination(renditions[0]["href"])
+        return None
+
+
+class SmartObjectJobStatus(BaseModel):
+    """Status response from Smart Object polling"""
+    jobId: str = Field(..., description="Job ID")
+    outputs: List[SmartObjectOutputStatus] = Field(..., description="List of outputs with their statuses")
     links: Optional[dict] = Field(None, alias="_links", description="Job status links")
 
     class Config:

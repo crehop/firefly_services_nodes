@@ -1,7 +1,8 @@
 """
-Adobe Photoshop PSD to ActionJSON Node
+Adobe Photoshop ActionJSON Node
 
-Execute Photoshop actions defined in JSON format on PSD files using Adobe Photoshop API.
+Execute Photoshop actions defined in JSON format using Adobe Photoshop API.
+Accepts IMAGE tensor, file path (PSD/PNG/JPG), or URL as input.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from .photoshop_api import (
     ActionJsonResponse,
     ActionJsonJobStatus,
 )
-from .photoshop_storage import upload_file_to_s3, generate_output_presigned_url, generate_download_url
+from .photoshop_storage import upload_file_to_s3, upload_image_to_s3, generate_output_presigned_url, generate_download_url
 from ..Firefly.firefly_storage import create_adobe_client
 from ..client import (
     ApiEndpoint,
@@ -39,12 +40,12 @@ from ..client import (
 
 class PhotoshopPsdActionJsonNode:
     """
-    Execute Photoshop actions defined in JSON format on PSD files using Adobe Photoshop API.
+    Execute Photoshop actions defined in JSON format using Adobe Photoshop API.
 
     Features:
     - Execute actions defined in JSON format (no .atn file needed)
-    - Support for PSD file input (local path or URL)
-    - Support for patterns, fonts, brushes, and additional images
+    - Multiple input types: IMAGE tensor, file path (PSD/PNG/JPG), or pre-signed URL
+    - Support for patterns, fonts, brushes, and up to 10 additional images
     - Outputs IMAGE tensor or PSD file URL
     - Comprehensive debug logging
     - Async polling for results
@@ -59,14 +60,20 @@ class PhotoshopPsdActionJsonNode:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                # Input PSD file
+            "optional": {
+                # Input sources (provide ONE: image tensor, image_reference, or psd_input)
+                "image": ("IMAGE", {
+                    "tooltip": "Input image tensor to process (auto-uploaded to S3)",
+                }),
+                "image_reference": ("STRING", {
+                    "default": "",
+                    "forceInput": True,
+                    "tooltip": "Input image: local file path or URL (auto-uploaded to S3 if local path)",
+                }),
                 "psd_input": ("STRING", {
                     "default": "",
-                    "tooltip": "PSD input: local file path or URL",
+                    "tooltip": "PSD input: local file path or URL (auto-uploaded to S3 if local path)",
                 }),
-            },
-            "optional": {
 
                 # ActionJSON
                 "action_json": ("STRING", {
@@ -115,6 +122,36 @@ class PhotoshopPsdActionJsonNode:
                     "multiline": False,
                     "tooltip": "URL to brush file (.abr) - optional",
                 }),
+                "additional_image": ("IMAGE", {
+                    "tooltip": "Additional image #1 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_0",
+                }),
+                "additional_image_2": ("IMAGE", {
+                    "tooltip": "Additional image #2 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_1",
+                }),
+                "additional_image_3": ("IMAGE", {
+                    "tooltip": "Additional image #3 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_2",
+                }),
+                "additional_image_4": ("IMAGE", {
+                    "tooltip": "Additional image #4 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_3",
+                }),
+                "additional_image_5": ("IMAGE", {
+                    "tooltip": "Additional image #5 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_4",
+                }),
+                "additional_image_6": ("IMAGE", {
+                    "tooltip": "Additional image #6 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_5",
+                }),
+                "additional_image_7": ("IMAGE", {
+                    "tooltip": "Additional image #7 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_6",
+                }),
+                "additional_image_8": ("IMAGE", {
+                    "tooltip": "Additional image #8 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_7",
+                }),
+                "additional_image_9": ("IMAGE", {
+                    "tooltip": "Additional image #9 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_8",
+                }),
+                "additional_image_10": ("IMAGE", {
+                    "tooltip": "Additional image #10 (auto-uploaded to S3) - ref as ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_9",
+                }),
                 "additional_image_url": ("STRING", {
                     "default": "",
                     "multiline": False,
@@ -129,8 +166,8 @@ class PhotoshopPsdActionJsonNode:
         output_type: str,
         output_quality: int,
         compression: str,
-        psd_input: str,
-        is_local_file: bool,
+        input_source: str,
+        input_type: str,
         pattern_url: str,
         font_url: str,
         brush_url: str,
@@ -148,10 +185,12 @@ class PhotoshopPsdActionJsonNode:
 
         # Input
         log += "  inputs:\n"
-        if is_local_file:
-            log += f"    - href: [S3_PRESIGNED_URL] (from local file: {psd_input})\n"
+        if input_type == "tensor":
+            log += "    - href: [S3_PRESIGNED_URL] (from image tensor)\n"
+        elif input_type == "local_file":
+            log += f"    - href: [S3_PRESIGNED_URL] (from local file: {input_source})\n"
         else:
-            log += f"    - href: {psd_input}\n"
+            log += f"    - href: {input_source}\n"
         log += "      storage: external\n"
 
         # Output
@@ -198,6 +237,8 @@ class PhotoshopPsdActionJsonNode:
 
     async def api_call(
         self,
+        image: Optional[torch.Tensor] = None,
+        image_reference: str = "",
         psd_input: str = "",
         action_json: str = "[]",
         output_type: str = "image/png",
@@ -206,21 +247,47 @@ class PhotoshopPsdActionJsonNode:
         pattern_url: str = "",
         font_url: str = "",
         brush_url: str = "",
+        additional_image: Optional[torch.Tensor] = None,
+        additional_image_2: Optional[torch.Tensor] = None,
+        additional_image_3: Optional[torch.Tensor] = None,
+        additional_image_4: Optional[torch.Tensor] = None,
+        additional_image_5: Optional[torch.Tensor] = None,
+        additional_image_6: Optional[torch.Tensor] = None,
+        additional_image_7: Optional[torch.Tensor] = None,
+        additional_image_8: Optional[torch.Tensor] = None,
+        additional_image_9: Optional[torch.Tensor] = None,
+        additional_image_10: Optional[torch.Tensor] = None,
         additional_image_url: str = "",
     ):
-        """Execute Photoshop actionJSON on PSD file using Photoshop API."""
+        """Execute Photoshop actionJSON using Photoshop API."""
 
-        # Validate inputs
-        if not psd_input:
-            raise ValueError("Must provide 'psd_input' (local file path or URL)")
+        # Validate inputs - must provide exactly one source
+        sources_provided = sum([
+            image is not None,
+            bool(image_reference),
+            bool(psd_input),
+        ])
+        if sources_provided == 0:
+            raise ValueError("Must provide one of: 'image' (tensor), 'image_reference' (file path or URL), or 'psd_input' (PSD file path or URL)")
+        if sources_provided > 1:
+            raise ValueError("Provide only ONE input source: 'image', 'image_reference', or 'psd_input'")
 
-        # Detect if input is URL or local file path
-        is_url = psd_input.startswith(("http://", "https://"))
-        is_local_file = not is_url
-
-        # Validate file exists if local path
-        if is_local_file and not os.path.exists(psd_input):
-            raise ValueError(f"PSD file not found at path: {psd_input}")
+        # Determine input type for debug logging
+        if image is not None:
+            input_source = "image tensor"
+            input_type = "tensor"
+        elif image_reference:
+            input_source = image_reference
+            is_url = image_reference.startswith(("http://", "https://"))
+            input_type = "url" if is_url else "local_file"
+            if not is_url and not os.path.exists(image_reference):
+                raise ValueError(f"File not found at path: {image_reference}")
+        else:
+            input_source = psd_input
+            is_url = psd_input.startswith(("http://", "https://"))
+            input_type = "url" if is_url else "local_file"
+            if not is_url and not os.path.exists(psd_input):
+                raise ValueError(f"PSD file not found at path: {psd_input}")
 
         # Validate output parameters
         if output_type == "image/jpeg" and compression != "small":
@@ -265,8 +332,8 @@ class PhotoshopPsdActionJsonNode:
             output_type=output_type,
             output_quality=output_quality,
             compression=compression,
-            psd_input=psd_input,
-            is_local_file=is_local_file,
+            input_source=input_source,
+            input_type=input_type,
             pattern_url=pattern_url,
             font_url=font_url,
             brush_url=brush_url,
@@ -276,28 +343,59 @@ class PhotoshopPsdActionJsonNode:
         client = await create_adobe_client()
 
         try:
-            # Get input URL
-            if is_local_file:
+            # Get input URL - resolve from tensor, local file, or URL
+            if image is not None:
+                # IMAGE tensor -> upload to S3
                 console_log += f"\n{'='*55}\n"
-                console_log += "Uploading PSD file to S3...\n"
+                console_log += "Uploading input image tensor to S3...\n"
 
-                # Get file size
-                file_size = os.path.getsize(psd_input)
-                console_log += f"  File path: {psd_input}\n"
-                console_log += f"  File size: {file_size / (1024*1024):.2f} MB\n"
+                img_tensor = image[0]
+                h, w, c = img_tensor.shape
+                console_log += f"  Image size: {w}x{h} ({c} channels)\n"
 
-                # Upload and measure time
                 upload_start = time.time()
-                input_url = await upload_file_to_s3(psd_input, content_type="image/vnd.adobe.photoshop")
+                input_url = await upload_image_to_s3(img_tensor)
                 upload_duration = time.time() - upload_start
 
                 console_log += f"[OK] Upload complete ({upload_duration:.2f}s)\n"
                 console_log += f"  Pre-signed URL generated (valid 24h)\n"
                 console_log += f"  URL: {input_url[:100]}...\n"
-            else:
-                input_url = psd_input
+
+            elif input_type == "local_file":
+                # Local file path -> upload to S3
+                file_path = image_reference or psd_input
                 console_log += f"\n{'='*55}\n"
-                console_log += "Using provided PSD URL\n"
+                console_log += f"Uploading file to S3...\n"
+
+                file_size = os.path.getsize(file_path)
+                console_log += f"  File path: {file_path}\n"
+                console_log += f"  File size: {file_size / (1024*1024):.2f} MB\n"
+
+                # Detect content type from extension
+                ext = os.path.splitext(file_path)[1].lower()
+                content_type_map = {
+                    ".psd": "image/vnd.adobe.photoshop",
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".tiff": "image/tiff",
+                    ".tif": "image/tiff",
+                }
+                content_type = content_type_map.get(ext, "application/octet-stream")
+
+                upload_start = time.time()
+                input_url = await upload_file_to_s3(file_path, content_type=content_type)
+                upload_duration = time.time() - upload_start
+
+                console_log += f"[OK] Upload complete ({upload_duration:.2f}s)\n"
+                console_log += f"  Pre-signed URL generated (valid 24h)\n"
+                console_log += f"  URL: {input_url[:100]}...\n"
+
+            else:
+                # Already a URL - use directly
+                input_url = image_reference or psd_input
+                console_log += f"\n{'='*55}\n"
+                console_log += "Using provided URL\n"
                 console_log += f"  URL: {input_url[:80]}{'...' if len(input_url) > 80 else ''}\n"
 
             # Create output URL (S3 pre-signed PUT URL)
@@ -337,9 +435,45 @@ class PhotoshopPsdActionJsonNode:
             if brush_url:
                 brushes = [PhotoshopAsset(href=brush_url, storage="external")]
 
-            additional_images = None
-            if additional_image_url:
-                additional_images = [PhotoshopAsset(href=additional_image_url, storage="external")]
+            # Upload additional images (up to 10)
+            additional_images_list = []
+            all_additional = [
+                (1, additional_image),
+                (2, additional_image_2),
+                (3, additional_image_3),
+                (4, additional_image_4),
+                (5, additional_image_5),
+                (6, additional_image_6),
+                (7, additional_image_7),
+                (8, additional_image_8),
+                (9, additional_image_9),
+                (10, additional_image_10),
+            ]
+            for idx, img_tensor in all_additional:
+                if img_tensor is not None:
+                    api_idx = idx - 1  # API uses 0-based index
+                    console_log += f"\n{'='*55}\n"
+                    console_log += f"Uploading additional image #{idx} to S3...\n"
+                    console_log += f"  ActionJSON ref: ACTION_JSON_OPTIONS_ADDITIONAL_IMAGES_{api_idx}\n"
+
+                    add_img = img_tensor[0]
+                    h, w, c = add_img.shape
+                    console_log += f"  Image size: {w}x{h} ({c} channels)\n"
+
+                    upload_start = time.time()
+                    uploaded_url = await upload_image_to_s3(add_img)
+                    upload_duration = time.time() - upload_start
+
+                    console_log += f"[OK] Upload complete ({upload_duration:.2f}s)\n"
+                    console_log += f"  Pre-signed URL generated (valid 24h)\n"
+
+                    additional_images_list.append(PhotoshopAsset(href=uploaded_url, storage="external"))
+
+            # Fall back to URL if no tensors provided
+            if not additional_images_list and additional_image_url:
+                additional_images_list.append(PhotoshopAsset(href=additional_image_url, storage="external"))
+
+            additional_images = additional_images_list if additional_images_list else None
 
             output_params = {
                 "href": output_url_presigned,
@@ -574,11 +708,16 @@ class PhotoshopPsdActionJsonNode:
                 pass  # Already closed or error closing
 
 
-# Node registration
+# Backward compatibility alias
+PhotoshopActionJsonNode = PhotoshopPsdActionJsonNode
+
+# Node registration - both names point to the same consolidated class
 NODE_CLASS_MAPPINGS = {
     "PhotoshopPsdActionJsonNode": PhotoshopPsdActionJsonNode,
+    "PhotoshopActionJsonNode": PhotoshopPsdActionJsonNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PhotoshopPsdActionJsonNode": "Photoshop PSD ActionJSON",
+    "PhotoshopPsdActionJsonNode": "Photoshop ActionJSON",
+    "PhotoshopActionJsonNode": "Photoshop ActionJSON",
 }
